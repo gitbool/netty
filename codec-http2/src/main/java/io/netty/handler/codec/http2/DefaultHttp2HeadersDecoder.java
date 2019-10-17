@@ -20,8 +20,8 @@ import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.UnstableApi;
 
 import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_HEADER_LIST_SIZE;
-import static io.netty.handler.codec.http2.Http2CodecUtil.DEFAULT_INITIAL_HUFFMAN_DECODE_CAPACITY;
 import static io.netty.handler.codec.http2.Http2Error.COMPRESSION_ERROR;
+import static io.netty.handler.codec.http2.Http2Error.INTERNAL_ERROR;
 import static io.netty.handler.codec.http2.Http2Exception.connectionError;
 
 @UnstableApi
@@ -31,6 +31,7 @@ public class DefaultHttp2HeadersDecoder implements Http2HeadersDecoder, Http2Hea
 
     private final HpackDecoder hpackDecoder;
     private final boolean validateHeaders;
+    private long maxHeaderListSizeGoAway;
 
     /**
      * Used to calculate an exponential moving average of header sizes to get an estimate of how large the data
@@ -55,7 +56,7 @@ public class DefaultHttp2HeadersDecoder implements Http2HeadersDecoder, Http2Hea
      *  (which is dangerous).
      */
     public DefaultHttp2HeadersDecoder(boolean validateHeaders, long maxHeaderListSize) {
-        this(validateHeaders, maxHeaderListSize, DEFAULT_INITIAL_HUFFMAN_DECODE_CAPACITY);
+        this(validateHeaders, maxHeaderListSize, /* initialHuffmanDecodeCapacity= */ -1);
     }
 
     /**
@@ -65,11 +66,11 @@ public class DefaultHttp2HeadersDecoder implements Http2HeadersDecoder, Http2Hea
      *  This is because <a href="https://tools.ietf.org/html/rfc7540#section-6.5.1">SETTINGS_MAX_HEADER_LIST_SIZE</a>
      *  allows a lower than advertised limit from being enforced, and the default limit is unlimited
      *  (which is dangerous).
-     * @param initialHuffmanDecodeCapacity Size of an intermediate buffer used during huffman decode.
+     * @param initialHuffmanDecodeCapacity Does nothing, do not use.
      */
     public DefaultHttp2HeadersDecoder(boolean validateHeaders, long maxHeaderListSize,
-                                      int initialHuffmanDecodeCapacity) {
-        this(validateHeaders, new HpackDecoder(maxHeaderListSize, initialHuffmanDecodeCapacity));
+                                      @Deprecated int initialHuffmanDecodeCapacity) {
+        this(validateHeaders, new HpackDecoder(maxHeaderListSize));
     }
 
     /**
@@ -79,6 +80,8 @@ public class DefaultHttp2HeadersDecoder implements Http2HeadersDecoder, Http2Hea
     DefaultHttp2HeadersDecoder(boolean validateHeaders, HpackDecoder hpackDecoder) {
         this.hpackDecoder = ObjectUtil.checkNotNull(hpackDecoder, "hpackDecoder");
         this.validateHeaders = validateHeaders;
+        this.maxHeaderListSizeGoAway =
+                Http2CodecUtil.calculateMaxHeaderListSizeGoAway(hpackDecoder.getMaxHeaderListSize());
     }
 
     @Override
@@ -93,7 +96,12 @@ public class DefaultHttp2HeadersDecoder implements Http2HeadersDecoder, Http2Hea
 
     @Override
     public void maxHeaderListSize(long max, long goAwayMax) throws Http2Exception {
-        hpackDecoder.setMaxHeaderListSize(max, goAwayMax);
+        if (goAwayMax < max || goAwayMax < 0) {
+            throw connectionError(INTERNAL_ERROR, "Header List Size GO_AWAY %d must be non-negative and >= %d",
+                    goAwayMax, max);
+        }
+        hpackDecoder.setMaxHeaderListSize(max);
+        this.maxHeaderListSizeGoAway = goAwayMax;
     }
 
     @Override
@@ -103,7 +111,7 @@ public class DefaultHttp2HeadersDecoder implements Http2HeadersDecoder, Http2Hea
 
     @Override
     public long maxHeaderListSizeGoAway() {
-        return hpackDecoder.getMaxHeaderListSizeGoAway();
+        return maxHeaderListSizeGoAway;
     }
 
     @Override

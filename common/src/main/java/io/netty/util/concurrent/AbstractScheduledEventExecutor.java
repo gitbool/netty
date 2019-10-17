@@ -19,17 +19,17 @@ import io.netty.util.internal.DefaultPriorityQueue;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.PriorityQueue;
 
+import static io.netty.util.concurrent.ScheduledFutureTask.deadlineNanos;
+
 import java.util.Comparator;
 import java.util.Queue;
 import java.util.concurrent.Callable;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 /**
  * Abstract base class for {@link EventExecutor}s that want to support scheduling.
  */
 public abstract class AbstractScheduledEventExecutor extends AbstractEventExecutor {
-
     private static final Comparator<ScheduledFutureTask<?>> SCHEDULED_FUTURE_TASK_COMPARATOR =
             new Comparator<ScheduledFutureTask<?>>() {
                 @Override
@@ -40,6 +40,8 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
 
     PriorityQueue<ScheduledFutureTask<?>> scheduledTaskQueue;
 
+    long nextTaskId;
+
     protected AbstractScheduledEventExecutor() {
     }
 
@@ -49,6 +51,24 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
 
     protected static long nanoTime() {
         return ScheduledFutureTask.nanoTime();
+    }
+
+    /**
+     * Given an arbitrary deadline {@code deadlineNanos}, calculate the number of nano seconds from now
+     * {@code deadlineNanos} would expire.
+     * @param deadlineNanos An arbitrary deadline in nano seconds.
+     * @return the number of nano seconds from now {@code deadlineNanos} would expire.
+     */
+    protected static long deadlineToDelayNanos(long deadlineNanos) {
+        return ScheduledFutureTask.deadlineToDelayNanos(deadlineNanos);
+    }
+
+    /**
+     * The initial value used for delay and computations based upon a monatomic time source.
+     * @return initial value used for delay and computations based upon a monatomic time source.
+     */
+    protected static long initialNanoTime() {
+        return ScheduledFutureTask.initialNanoTime();
     }
 
     PriorityQueue<ScheduledFutureTask<?>> scheduledTaskQueue() {
@@ -78,7 +98,7 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
         }
 
         final ScheduledFutureTask<?>[] scheduledTasks =
-                scheduledTaskQueue.toArray(new ScheduledFutureTask<?>[scheduledTaskQueue.size()]);
+                scheduledTaskQueue.toArray(new ScheduledFutureTask<?>[0]);
 
         for (ScheduledFutureTask<?> task: scheduledTasks) {
             task.cancelWithoutRemove(false);
@@ -103,43 +123,40 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
 
         Queue<ScheduledFutureTask<?>> scheduledTaskQueue = this.scheduledTaskQueue;
         ScheduledFutureTask<?> scheduledTask = scheduledTaskQueue == null ? null : scheduledTaskQueue.peek();
-        if (scheduledTask == null) {
+        if (scheduledTask == null || scheduledTask.deadlineNanos() - nanoTime > 0) {
             return null;
         }
-
-        if (scheduledTask.deadlineNanos() <= nanoTime) {
-            scheduledTaskQueue.remove();
-            return scheduledTask;
-        }
-        return null;
+        scheduledTaskQueue.remove();
+        return scheduledTask;
     }
 
     /**
      * Return the nanoseconds when the next scheduled task is ready to be run or {@code -1} if no task is scheduled.
      */
     protected final long nextScheduledTaskNano() {
-        Queue<ScheduledFutureTask<?>> scheduledTaskQueue = this.scheduledTaskQueue;
-        ScheduledFutureTask<?> scheduledTask = scheduledTaskQueue == null ? null : scheduledTaskQueue.peek();
-        if (scheduledTask == null) {
-            return -1;
-        }
-        return Math.max(0, scheduledTask.deadlineNanos() - nanoTime());
+        ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
+        return scheduledTask != null ? Math.max(0, scheduledTask.deadlineNanos() - nanoTime()) : -1;
+    }
+
+    /**
+     * Return the deadline (in nanoseconds) when the next scheduled task is ready to be run or {@code -1}
+     * if no task is scheduled.
+     */
+    protected final long nextScheduledTaskDeadlineNanos() {
+        ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
+        return scheduledTask != null ? scheduledTask.deadlineNanos() : -1;
     }
 
     final ScheduledFutureTask<?> peekScheduledTask() {
         Queue<ScheduledFutureTask<?>> scheduledTaskQueue = this.scheduledTaskQueue;
-        if (scheduledTaskQueue == null) {
-            return null;
-        }
-        return scheduledTaskQueue.peek();
+        return scheduledTaskQueue != null ? scheduledTaskQueue.peek() : null;
     }
 
     /**
      * Returns {@code true} if a scheduled task is ready for processing.
      */
     protected final boolean hasScheduledTasks() {
-        Queue<ScheduledFutureTask<?>> scheduledTaskQueue = this.scheduledTaskQueue;
-        ScheduledFutureTask<?> scheduledTask = scheduledTaskQueue == null ? null : scheduledTaskQueue.peek();
+        ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
         return scheduledTask != null && scheduledTask.deadlineNanos() <= nanoTime();
     }
 
@@ -150,8 +167,10 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
         if (delay < 0) {
             delay = 0;
         }
+        validateScheduled0(delay, unit);
+
         return schedule(new ScheduledFutureTask<Void>(
-                this, command, null, ScheduledFutureTask.deadlineNanos(unit.toNanos(delay))));
+                this, command, deadlineNanos(unit.toNanos(delay))));
     }
 
     @Override
@@ -161,8 +180,9 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
         if (delay < 0) {
             delay = 0;
         }
-        return schedule(new ScheduledFutureTask<V>(
-                this, callable, ScheduledFutureTask.deadlineNanos(unit.toNanos(delay))));
+        validateScheduled0(delay, unit);
+
+        return schedule(new ScheduledFutureTask<V>(this, callable, deadlineNanos(unit.toNanos(delay))));
     }
 
     @Override
@@ -177,10 +197,11 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
             throw new IllegalArgumentException(
                     String.format("period: %d (expected: > 0)", period));
         }
+        validateScheduled0(initialDelay, unit);
+        validateScheduled0(period, unit);
 
         return schedule(new ScheduledFutureTask<Void>(
-                this, Executors.<Void>callable(command, null),
-                ScheduledFutureTask.deadlineNanos(unit.toNanos(initialDelay)), unit.toNanos(period)));
+                this, command, deadlineNanos(unit.toNanos(initialDelay)), unit.toNanos(period)));
     }
 
     @Override
@@ -196,21 +217,38 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
                     String.format("delay: %d (expected: > 0)", delay));
         }
 
+        validateScheduled0(initialDelay, unit);
+        validateScheduled0(delay, unit);
+
         return schedule(new ScheduledFutureTask<Void>(
-                this, Executors.<Void>callable(command, null),
-                ScheduledFutureTask.deadlineNanos(unit.toNanos(initialDelay)), -unit.toNanos(delay)));
+                this, command, deadlineNanos(unit.toNanos(initialDelay)), -unit.toNanos(delay)));
     }
 
-    <V> ScheduledFuture<V> schedule(final ScheduledFutureTask<V> task) {
+    @SuppressWarnings("deprecation")
+    private void validateScheduled0(long amount, TimeUnit unit) {
+        validateScheduled(amount, unit);
+    }
+
+    /**
+     * Sub-classes may override this to restrict the maximal amount of time someone can use to schedule a task.
+     *
+     * @deprecated will be removed in the future.
+     */
+    @Deprecated
+    protected void validateScheduled(long amount, TimeUnit unit) {
+        // NOOP
+    }
+
+    private <V> ScheduledFuture<V> schedule(final ScheduledFutureTask<V> task) {
         if (inEventLoop()) {
-            scheduledTaskQueue().add(task);
+            scheduledTaskQueue().add(task.setId(nextTaskId++));
         } else {
-            execute(new Runnable() {
+            executeScheduledRunnable(new Runnable() {
                 @Override
                 public void run() {
-                    scheduledTaskQueue().add(task);
+                    scheduledTaskQueue().add(task.setId(nextTaskId++));
                 }
-            });
+            }, true, task.deadlineNanos());
         }
 
         return task;
@@ -220,12 +258,27 @@ public abstract class AbstractScheduledEventExecutor extends AbstractEventExecut
         if (inEventLoop()) {
             scheduledTaskQueue().removeTyped(task);
         } else {
-            execute(new Runnable() {
+            executeScheduledRunnable(new Runnable() {
                 @Override
                 public void run() {
-                    removeScheduled(task);
+                    scheduledTaskQueue().removeTyped(task);
                 }
-            });
+            }, false, task.deadlineNanos());
         }
+    }
+
+    /**
+     * Execute a {@link Runnable} from outside the event loop thread that is responsible for adding or removing
+     * a scheduled action. Note that schedule events which occur on the event loop thread do not interact with this
+     * method.
+     * @param runnable The {@link Runnable} to execute which will add or remove a scheduled action
+     * @param isAddition {@code true} if the {@link Runnable} will add an action, {@code false} if it will remove an
+     *                   action
+     * @param deadlineNanos the deadline in nanos of the scheduled task that will be added or removed.
+     */
+    void executeScheduledRunnable(Runnable runnable,
+                                            @SuppressWarnings("unused") boolean isAddition,
+                                            @SuppressWarnings("unused") long deadlineNanos) {
+        execute(runnable);
     }
 }

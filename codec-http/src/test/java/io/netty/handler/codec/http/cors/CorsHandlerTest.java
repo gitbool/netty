@@ -26,41 +26,26 @@ import io.netty.handler.codec.http.HttpResponse;
 import io.netty.handler.codec.http.HttpUtil;
 import io.netty.util.AsciiString;
 import io.netty.util.ReferenceCountUtil;
+import org.hamcrest.core.IsEqual;
 import org.junit.Test;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
 import java.util.concurrent.Callable;
 
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_ALLOW_CREDENTIALS;
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_ALLOW_HEADERS;
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_ALLOW_METHODS;
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_ALLOW_ORIGIN;
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_EXPOSE_HEADERS;
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_REQUEST_HEADERS;
-import static io.netty.handler.codec.http.HttpHeaderNames.ACCESS_CONTROL_REQUEST_METHOD;
-import static io.netty.handler.codec.http.HttpHeaderNames.CONNECTION;
-import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
-import static io.netty.handler.codec.http.HttpHeaderNames.DATE;
-import static io.netty.handler.codec.http.HttpHeaderNames.ORIGIN;
-import static io.netty.handler.codec.http.HttpHeaderNames.VARY;
-import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
+import static io.netty.handler.codec.http.HttpHeaderNames.*;
 import static io.netty.handler.codec.http.HttpHeaderValues.CLOSE;
+import static io.netty.handler.codec.http.HttpHeaderValues.KEEP_ALIVE;
 import static io.netty.handler.codec.http.HttpHeadersTestUtils.of;
-import static io.netty.handler.codec.http.HttpMethod.DELETE;
-import static io.netty.handler.codec.http.HttpMethod.GET;
-import static io.netty.handler.codec.http.HttpMethod.OPTIONS;
+import static io.netty.handler.codec.http.HttpMethod.*;
 import static io.netty.handler.codec.http.HttpResponseStatus.FORBIDDEN;
 import static io.netty.handler.codec.http.HttpResponseStatus.OK;
 import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
-import static io.netty.handler.codec.http.cors.CorsConfigBuilder.forAnyOrigin;
-import static io.netty.handler.codec.http.cors.CorsConfigBuilder.forOrigin;
-import static io.netty.handler.codec.http.cors.CorsConfigBuilder.forOrigins;
-import static org.hamcrest.CoreMatchers.containsString;
-import static org.hamcrest.CoreMatchers.equalTo;
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.notNullValue;
-import static org.hamcrest.CoreMatchers.nullValue;
+import static io.netty.handler.codec.http.cors.CorsConfigBuilder.*;
+import static org.hamcrest.CoreMatchers.*;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.core.IsEqual.equalTo;
 
 public class CorsHandlerTest {
 
@@ -68,6 +53,7 @@ public class CorsHandlerTest {
     public void nonCorsRequest() {
         final HttpResponse response = simpleRequest(forAnyOrigin().build(), null);
         assertThat(response.headers().contains(ACCESS_CONTROL_ALLOW_ORIGIN), is(false));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -75,6 +61,7 @@ public class CorsHandlerTest {
         final HttpResponse response = simpleRequest(forAnyOrigin().build(), "http://localhost:7777");
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is("*"));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -85,6 +72,7 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is("null"));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS), is(equalTo("true")));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -93,6 +81,7 @@ public class CorsHandlerTest {
         final HttpResponse response = simpleRequest(forOrigin(origin).build(), origin);
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(origin));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -103,9 +92,12 @@ public class CorsHandlerTest {
         final HttpResponse response1 = simpleRequest(forOrigins(origins).build(), origin1);
         assertThat(response1.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(origin1));
         assertThat(response1.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response1), is(true));
+
         final HttpResponse response2 = simpleRequest(forOrigins(origins).build(), origin2);
         assertThat(response2.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(origin2));
         assertThat(response2.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response2), is(true));
     }
 
     @Test
@@ -115,6 +107,7 @@ public class CorsHandlerTest {
                 forOrigins("https://localhost:8888").build(), origin);
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(nullValue()));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -127,6 +120,7 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_METHODS), containsString("GET"));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_METHODS), containsString("DELETE"));
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -142,6 +136,7 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), containsString("content-type"));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_HEADERS), containsString("xheader1"));
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -151,6 +146,7 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(CONTENT_LENGTH), is("0"));
         assertThat(response.headers().get(DATE), is(notNullValue()));
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -162,6 +158,16 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(of("CustomHeader")), equalTo("somevalue"));
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
         assertThat(response.headers().get(CONTENT_LENGTH), is("0"));
+        assertThat(ReferenceCountUtil.release(response), is(true));
+    }
+
+    @Test
+    public void preflightRequestWithUnauthorizedOrigin() {
+        final String origin = "http://host";
+        final CorsConfig config = forOrigin("http://localhost").build();
+        final HttpResponse response = preflightRequest(config, origin, "xheader1");
+        assertThat(response.headers().contains(ACCESS_CONTROL_ALLOW_ORIGIN), is(false));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -175,6 +181,7 @@ public class CorsHandlerTest {
         final HttpResponse response = preflightRequest(config, "http://localhost:8888", "content-type, xheader1");
         assertValues(response, headerName, value1, value2);
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -188,6 +195,7 @@ public class CorsHandlerTest {
         final HttpResponse response = preflightRequest(config, "http://localhost:8888", "content-type, xheader1");
         assertValues(response, headerName, value1, value2);
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -202,6 +210,7 @@ public class CorsHandlerTest {
         final HttpResponse response = preflightRequest(config, "http://localhost:8888", "content-type, xheader1");
         assertThat(response.headers().get(of("GenHeader")), equalTo("generatedValue"));
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -214,6 +223,7 @@ public class CorsHandlerTest {
         final HttpResponse response = preflightRequest(config, origin, "content-type, xheader1");
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(equalTo("null")));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS), is(equalTo("true")));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -222,6 +232,7 @@ public class CorsHandlerTest {
         final CorsConfig config = forOrigin(origin).allowCredentials().build();
         final HttpResponse response = preflightRequest(config, origin, "content-type, xheader1");
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS), is(equalTo("true")));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -230,6 +241,7 @@ public class CorsHandlerTest {
         final HttpResponse response = preflightRequest(config, "http://localhost:8888", "");
         // the only valid value for Access-Control-Allow-Credentials is true.
         assertThat(response.headers().contains(ACCESS_CONTROL_ALLOW_CREDENTIALS), is(false));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -239,6 +251,7 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), equalTo("*"));
         assertThat(response.headers().get(ACCESS_CONTROL_EXPOSE_HEADERS), containsString("custom1"));
         assertThat(response.headers().get(ACCESS_CONTROL_EXPOSE_HEADERS), containsString("custom2"));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -246,6 +259,7 @@ public class CorsHandlerTest {
         final CorsConfig config = forAnyOrigin().allowCredentials().build();
         final HttpResponse response = simpleRequest(config, "http://localhost:7777");
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS), equalTo("true"));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -253,6 +267,7 @@ public class CorsHandlerTest {
         final CorsConfig config = forAnyOrigin().build();
         final HttpResponse response = simpleRequest(config, "http://localhost:7777");
         assertThat(response.headers().contains(ACCESS_CONTROL_ALLOW_CREDENTIALS), is(false));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -262,6 +277,7 @@ public class CorsHandlerTest {
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_CREDENTIALS), equalTo("true"));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), equalTo("http://localhost:7777"));
         assertThat(response.headers().get(VARY), equalTo(ORIGIN.toString()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -270,6 +286,7 @@ public class CorsHandlerTest {
         final HttpResponse response = simpleRequest(config, "http://localhost:7777");
         assertThat(response.headers().get(ACCESS_CONTROL_EXPOSE_HEADERS), containsString("one"));
         assertThat(response.headers().get(ACCESS_CONTROL_EXPOSE_HEADERS), containsString("two"));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -278,6 +295,7 @@ public class CorsHandlerTest {
         final HttpResponse response = simpleRequest(config, "http://localhost:7777");
         assertThat(response.status(), is(FORBIDDEN));
         assertThat(response.headers().get(CONTENT_LENGTH), is("0"));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -286,6 +304,7 @@ public class CorsHandlerTest {
         final HttpResponse response = simpleRequest(config, "http://localhost:7777");
         assertThat(response.status(), is(OK));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -294,6 +313,7 @@ public class CorsHandlerTest {
         final HttpResponse response = simpleRequest(config, null);
         assertThat(response.status(), is(OK));
         assertThat(response.headers().get(ACCESS_CONTROL_ALLOW_ORIGIN), is(nullValue()));
+        assertThat(ReferenceCountUtil.release(response), is(true));
     }
 
     @Test
@@ -422,6 +442,46 @@ public class CorsHandlerTest {
         assertThat(channel.finish(), is(false));
     }
 
+    @Test
+    public void differentConfigsPerOrigin() {
+        String host1 = "http://host1:80";
+        String host2 = "http://host2";
+        CorsConfig rule1 = forOrigin(host1).allowedRequestMethods(HttpMethod.GET).build();
+        CorsConfig rule2 = forOrigin(host2).allowedRequestMethods(HttpMethod.GET, HttpMethod.POST)
+                .allowCredentials().build();
+
+        List<CorsConfig> corsConfigs = Arrays.asList(rule1, rule2);
+
+        final HttpResponse preFlightHost1 = preflightRequest(corsConfigs, host1, "", false);
+        assertThat(preFlightHost1.headers().get(ACCESS_CONTROL_ALLOW_METHODS), is("GET"));
+        assertThat(preFlightHost1.headers().getAsString(ACCESS_CONTROL_ALLOW_CREDENTIALS), is(nullValue()));
+
+        final HttpResponse preFlightHost2 = preflightRequest(corsConfigs, host2, "", false);
+        assertValues(preFlightHost2, ACCESS_CONTROL_ALLOW_METHODS.toString(), "GET", "POST");
+        assertThat(preFlightHost2.headers().getAsString(ACCESS_CONTROL_ALLOW_CREDENTIALS), IsEqual.equalTo("true"));
+    }
+
+    @Test
+    public void specificConfigPrecedenceOverGeneric() {
+        String host1 = "http://host1";
+        String host2 = "http://host2";
+
+        CorsConfig forHost1 = forOrigin(host1).allowedRequestMethods(HttpMethod.GET).maxAge(3600L).build();
+        CorsConfig allowAll = forAnyOrigin().allowedRequestMethods(HttpMethod.POST, HttpMethod.GET, HttpMethod.OPTIONS)
+                .maxAge(1800).build();
+
+        List<CorsConfig> rules = Arrays.asList(forHost1, allowAll);
+
+        final HttpResponse host1Response = preflightRequest(rules, host1, "", false);
+        assertThat(host1Response.headers().get(ACCESS_CONTROL_ALLOW_METHODS), is("GET"));
+        assertThat(host1Response.headers().getAsString(ACCESS_CONTROL_MAX_AGE), equalTo("3600"));
+
+        final HttpResponse host2Response = preflightRequest(rules, host2, "", false);
+        assertValues(host2Response, ACCESS_CONTROL_ALLOW_METHODS.toString(), "POST", "GET", "OPTIONS");
+        assertThat(host2Response.headers().getAsString(ACCESS_CONTROL_ALLOW_ORIGIN), equalTo("*"));
+        assertThat(host2Response.headers().getAsString(ACCESS_CONTROL_MAX_AGE), equalTo("1800"));
+    }
+
     private static HttpResponse simpleRequest(final CorsConfig config, final String origin) {
         return simpleRequest(config, origin, null);
     }
@@ -445,13 +505,22 @@ public class CorsHandlerTest {
             httpRequest.headers().set(ACCESS_CONTROL_REQUEST_HEADERS, requestHeaders);
         }
         assertThat(channel.writeInbound(httpRequest), is(false));
-        return (HttpResponse) channel.readOutbound();
+        HttpResponse response =  channel.readOutbound();
+        assertThat(channel.finish(), is(false));
+        return response;
     }
 
     private static HttpResponse preflightRequest(final CorsConfig config,
                                                  final String origin,
                                                  final String requestHeaders) {
-        final EmbeddedChannel channel = new EmbeddedChannel(new CorsHandler(config));
+        return preflightRequest(Collections.singletonList(config), origin, requestHeaders, config.isShortCircuit());
+    }
+
+    private static HttpResponse preflightRequest(final List<CorsConfig> configs,
+                                                 final String origin,
+                                                 final String requestHeaders,
+                                                 final boolean isSHortCircuit) {
+        final EmbeddedChannel channel = new EmbeddedChannel(new CorsHandler(configs, isSHortCircuit));
         assertThat(channel.writeInbound(optionsRequest(origin, requestHeaders, null)), is(false));
         HttpResponse response = channel.readOutbound();
         assertThat(channel.finish(), is(false));

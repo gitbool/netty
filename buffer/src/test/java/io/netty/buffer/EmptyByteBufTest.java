@@ -14,6 +14,7 @@
  * under the License.
  */package io.netty.buffer;
 
+import io.netty.util.CharsetUtil;
 import org.junit.Test;
 
 import static org.hamcrest.Matchers.*;
@@ -82,4 +83,22 @@ public class EmptyByteBufTest {
             }
         }
     }
+
+    @Test
+    public void consistentEqualsAndHashCodeWithAbstractBytebuf() {
+        ByteBuf empty = new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT);
+        ByteBuf emptyAbstract = new UnpooledHeapByteBuf(UnpooledByteBufAllocator.DEFAULT, 0, 0);
+        assertEquals(emptyAbstract, empty);
+        assertEquals(emptyAbstract.hashCode(), empty.hashCode());
+        assertEquals(EmptyByteBuf.EMPTY_BYTE_BUF_HASH_CODE, empty.hashCode());
+        assertTrue(emptyAbstract.release());
+        assertFalse(empty.release());
+    }
+
+    @Test
+    public void testGetCharSequence() {
+        EmptyByteBuf empty = new EmptyByteBuf(UnpooledByteBufAllocator.DEFAULT);
+        assertEquals("", empty.readCharSequence(0, CharsetUtil.US_ASCII));
+    }
+
 }

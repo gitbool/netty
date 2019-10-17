@@ -20,6 +20,7 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
+import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
@@ -32,6 +33,7 @@ import io.netty.channel.socket.SocketChannelConfig;
 import io.netty.util.concurrent.GlobalEventExecutor;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SocketUtils;
+import io.netty.util.internal.SuppressJava6Requirement;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -44,6 +46,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.SelectionKey;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
+import java.util.Map;
 import java.util.concurrent.Executor;
 
 import static io.netty.channel.internal.ChannelUtils.MAX_BYTES_PER_GATHERING_WRITE_ATTEMPTED_LOW_THRESHOLD;
@@ -150,6 +153,7 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
         return (InetSocketAddress) super.remoteAddress();
     }
 
+    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     @UnstableApi
     @Override
     protected final void doShutdownOutput() throws Exception {
@@ -268,6 +272,7 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
         }
     }
 
+    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     private void shutdownInput0() throws Exception {
         if (PlatformDependent.javaVersion() >= 7) {
             javaChannel().shutdownInput();
@@ -461,7 +466,6 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
 
     private final class NioSocketChannelConfig extends DefaultSocketChannelConfig {
         private volatile int maxBytesPerGatheringWrite = Integer.MAX_VALUE;
-
         private NioSocketChannelConfig(NioSocketChannel channel, Socket javaSocket) {
             super(channel, javaSocket);
             calculateMaxBytesPerGatheringWrite();
@@ -479,6 +483,30 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
             return this;
         }
 
+        @Override
+        public <T> boolean setOption(ChannelOption<T> option, T value) {
+            if (PlatformDependent.javaVersion() >= 7 && option instanceof NioChannelOption) {
+                return NioChannelOption.setOption(jdkChannel(), (NioChannelOption<T>) option, value);
+            }
+            return super.setOption(option, value);
+        }
+
+        @Override
+        public <T> T getOption(ChannelOption<T> option) {
+            if (PlatformDependent.javaVersion() >= 7 && option instanceof NioChannelOption) {
+                return NioChannelOption.getOption(jdkChannel(), (NioChannelOption<T>) option);
+            }
+            return super.getOption(option);
+        }
+
+        @Override
+        public Map<ChannelOption<?>, Object> getOptions() {
+            if (PlatformDependent.javaVersion() >= 7) {
+                return getOptions(super.getOptions(), NioChannelOption.getOptions(jdkChannel()));
+            }
+            return super.getOptions();
+        }
+
         void setMaxBytesPerGatheringWrite(int maxBytesPerGatheringWrite) {
             this.maxBytesPerGatheringWrite = maxBytesPerGatheringWrite;
         }
@@ -491,8 +519,12 @@ public class NioSocketChannel extends AbstractNioByteChannel implements io.netty
             // Multiply by 2 to give some extra space in case the OS can process write data faster than we can provide.
             int newSendBufferSize = getSendBufferSize() << 1;
             if (newSendBufferSize > 0) {
-                setMaxBytesPerGatheringWrite(getSendBufferSize() << 1);
+                setMaxBytesPerGatheringWrite(newSendBufferSize);
             }
+        }
+
+        private SocketChannel jdkChannel() {
+            return ((NioSocketChannel) channel).javaChannel();
         }
     }
 }

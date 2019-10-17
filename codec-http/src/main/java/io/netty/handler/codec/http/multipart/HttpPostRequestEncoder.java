@@ -93,6 +93,7 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
         HTML5
     }
 
+    @SuppressWarnings("rawtypes")
     private static final Map.Entry[] percentEncodings;
 
     static {
@@ -637,7 +638,7 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
                         replacement.append("; ")
                                    .append(HttpHeaderValues.FILENAME)
                                    .append("=\"")
-                                   .append(fileUpload.getFilename())
+                                   .append(currentFileUpload.getFilename())
                                    .append('"');
                     }
 
@@ -779,12 +780,11 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
         }
         // Now consider size for chunk or not
         long realSize = globalBodySize;
-        if (isMultipart) {
-            iterator = multipartHttpDatas.listIterator();
-        } else {
+        if (!isMultipart) {
             realSize -= 1; // last '&' removed
-            iterator = multipartHttpDatas.listIterator();
         }
+        iterator = multipartHttpDatas.listIterator();
+
         headers.set(HttpHeaderNames.CONTENT_LENGTH, String.valueOf(realSize));
         if (realSize > HttpPostBodyUtil.chunkSize || isMultipart) {
             isChunked = true;
@@ -867,7 +867,7 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
 
     /**
      *
-     * @return the next ByteBuf to send as a HttpChunk and modifying currentBuffer accordingly
+     * @return the next ByteBuf to send as an HttpChunk and modifying currentBuffer accordingly
      */
     private ByteBuf fillByteBuf() {
         int length = currentBuffer.readableBytes();
@@ -948,13 +948,11 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
             isKey = false;
             if (currentBuffer == null) {
                 currentBuffer = wrappedBuffer(buffer, wrappedBuffer("=".getBytes()));
-                // continue
-                size -= buffer.readableBytes() + 1;
             } else {
                 currentBuffer = wrappedBuffer(currentBuffer, buffer, wrappedBuffer("=".getBytes()));
-                // continue
-                size -= buffer.readableBytes() + 1;
             }
+            // continue
+            size -= buffer.readableBytes() + 1;
             if (currentBuffer.readableBytes() >= HttpPostBodyUtil.chunkSize) {
                 buffer = fillByteBuf();
                 return new DefaultHttpContent(buffer);
@@ -979,7 +977,11 @@ public class HttpPostRequestEncoder implements ChunkedInput<HttpContent> {
         if (buffer.capacity() == 0) {
             currentData = null;
             if (currentBuffer == null) {
-                currentBuffer = delimiter;
+                if (delimiter == null) {
+                    return null;
+                } else {
+                    currentBuffer = delimiter;
+                }
             } else {
                 if (delimiter != null) {
                     currentBuffer = wrappedBuffer(currentBuffer, delimiter);

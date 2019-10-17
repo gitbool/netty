@@ -18,6 +18,7 @@ package io.netty.util.concurrent;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SystemPropertyUtil;
+import io.netty.util.internal.ThreadExecutorMap;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -31,11 +32,11 @@ import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
@@ -87,7 +88,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     private final Executor executor;
     private volatile boolean interrupted;
 
-    private final Semaphore threadLock = new Semaphore(0);
+    private final CountDownLatch threadLock = new CountDownLatch(1);
     private final Set<Runnable> shutdownHooks = new LinkedHashSet<Runnable>();
     private final boolean addTaskWakesUp;
     private final int maxPendingTasks;
@@ -161,9 +162,47 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         super(parent);
         this.addTaskWakesUp = addTaskWakesUp;
         this.maxPendingTasks = Math.max(16, maxPendingTasks);
-        this.executor = ObjectUtil.checkNotNull(executor, "executor");
+        this.executor = ThreadExecutorMap.apply(executor, this);
         taskQueue = newTaskQueue(this.maxPendingTasks);
         rejectedExecutionHandler = ObjectUtil.checkNotNull(rejectedHandler, "rejectedHandler");
+    }
+
+    protected SingleThreadEventExecutor(EventExecutorGroup parent, Executor executor,
+                                        boolean addTaskWakesUp, Queue<Runnable> taskQueue,
+                                        RejectedExecutionHandler rejectedHandler) {
+        super(parent);
+        this.addTaskWakesUp = addTaskWakesUp;
+        this.maxPendingTasks = DEFAULT_MAX_PENDING_EXECUTOR_TASKS;
+        this.executor = ThreadExecutorMap.apply(executor, this);
+        this.taskQueue = ObjectUtil.checkNotNull(taskQueue, "taskQueue");
+        rejectedExecutionHandler = ObjectUtil.checkNotNull(rejectedHandler, "rejectedHandler");
+    }
+
+    /**
+     * Called from arbitrary non-{@link EventExecutor} threads prior to scheduled task submission.
+     * Returns {@code true} if the {@link EventExecutor} thread should be woken immediately to
+     * process the scheduled task (if not already awake).
+     * <p>
+     * If {@code false} is returned, {@link #afterScheduledTaskSubmitted(long)} will be called with
+     * the same value <i>after</i> the scheduled task is enqueued, providing another opportunity
+     * to wake the {@link EventExecutor} thread if required.
+     *
+     * @param deadlineNanos deadline of the to-be-scheduled task
+     *     relative to {@link AbstractScheduledEventExecutor#nanoTime()}
+     * @return {@code true} if the {@link EventExecutor} thread should be woken, {@code false} otherwise
+     */
+    protected boolean beforeScheduledTaskSubmitted(long deadlineNanos) {
+        return true;
+    }
+
+    /**
+     * See {@link #beforeScheduledTaskSubmitted(long)}. Called only after that method returns false.
+     *
+     * @param deadlineNanos relative to {@link AbstractScheduledEventExecutor#nanoTime()}
+     * @return  {@code true} if the {@link EventExecutor} thread should be woken, {@code false} otherwise
+     */
+    protected boolean afterScheduledTaskSubmitted(long deadlineNanos) {
+        return true;
     }
 
     /**
@@ -207,10 +246,9 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     protected static Runnable pollTaskFrom(Queue<Runnable> taskQueue) {
         for (;;) {
             Runnable task = taskQueue.poll();
-            if (task == WAKEUP_TASK) {
-                continue;
+            if (task != WAKEUP_TASK) {
+                return task;
             }
-            return task;
         }
     }
 
@@ -271,16 +309,38 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     private boolean fetchFromScheduledTaskQueue() {
+        if (scheduledTaskQueue == null || scheduledTaskQueue.isEmpty()) {
+            return true;
+        }
         long nanoTime = AbstractScheduledEventExecutor.nanoTime();
-        Runnable scheduledTask  = pollScheduledTask(nanoTime);
-        while (scheduledTask != null) {
+        for (;;) {
+            Runnable scheduledTask = pollScheduledTask(nanoTime);
+            if (scheduledTask == null) {
+                return true;
+            }
             if (!taskQueue.offer(scheduledTask)) {
                 // No space left in the task queue add it back to the scheduledTaskQueue so we pick it up again.
-                scheduledTaskQueue().add((ScheduledFutureTask<?>) scheduledTask);
+                scheduledTaskQueue.add((ScheduledFutureTask<?>) scheduledTask);
                 return false;
             }
-            scheduledTask  = pollScheduledTask(nanoTime);
         }
+    }
+
+    /**
+     * @return {@code true} if at least one scheduled task was executed.
+     */
+    private boolean executeExpiredScheduledTasks() {
+        if (scheduledTaskQueue == null || scheduledTaskQueue.isEmpty()) {
+            return false;
+        }
+        long nanoTime = AbstractScheduledEventExecutor.nanoTime();
+        Runnable scheduledTask = pollScheduledTask(nanoTime);
+        if (scheduledTask == null) {
+            return false;
+        }
+        do {
+            safeExecute(scheduledTask);
+        } while ((scheduledTask = pollScheduledTask(nanoTime)) != null);
         return true;
     }
 
@@ -304,7 +364,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      * Return the number of tasks that are pending for processing.
      *
      * <strong>Be aware that this operation may be expensive as it depends on the internal implementation of the
-     * SingleThreadEventExecutor. So use it was care!</strong>
+     * SingleThreadEventExecutor. So use it with care!</strong>
      */
     public int pendingTasks() {
         return taskQueue.size();
@@ -365,6 +425,32 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     /**
+     * Execute all expired scheduled tasks and all current tasks in the executor queue until both queues are empty,
+     * or {@code maxDrainAttempts} has been exceeded.
+     * @param maxDrainAttempts The maximum amount of times this method attempts to drain from queues. This is to prevent
+     *                         continuous task execution and scheduling from preventing the EventExecutor thread to
+     *                         make progress and return to the selector mechanism to process inbound I/O events.
+     * @return {@code true} if at least one task was run.
+     */
+    protected final boolean runScheduledAndExecutorTasks(final int maxDrainAttempts) {
+        assert inEventLoop();
+        boolean ranAtLeastOneTask;
+        int drainAttempt = 0;
+        do {
+            // We must run the taskQueue tasks first, because the scheduled tasks from outside the EventLoop are queued
+            // here because the taskQueue is thread safe and the scheduledTaskQueue is not thread safe.
+            ranAtLeastOneTask = runExistingTasksFrom(taskQueue) | executeExpiredScheduledTasks();
+        } while (ranAtLeastOneTask && ++drainAttempt < maxDrainAttempts);
+
+        if (drainAttempt > 0) {
+            lastExecutionTime = ScheduledFutureTask.nanoTime();
+        }
+        afterRunningAllTasks();
+
+        return drainAttempt > 0;
+    }
+
+    /**
      * Runs all tasks from the passed {@code taskQueue}.
      *
      * @param taskQueue To poll and execute all tasks.
@@ -383,6 +469,26 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                 return true;
             }
         }
+    }
+
+    /**
+     * What ever tasks are present in {@code taskQueue} when this method is invoked will be {@link Runnable#run()}.
+     * @param taskQueue the task queue to drain.
+     * @return {@code true} if at least {@link Runnable#run()} was called.
+     */
+    private boolean runExistingTasksFrom(Queue<Runnable> taskQueue) {
+        Runnable task = pollTaskFrom(taskQueue);
+        if (task == null) {
+            return false;
+        }
+        int remaining = Math.min(maxPendingTasks, taskQueue.size());
+        safeExecute(task);
+        // Use taskQueue.poll() directly rather than pollTaskFrom() since the latter may
+        // silently consume more than one item from the queue (skips over WAKEUP_TASK instances)
+        while (remaining-- > 0 && (task = taskQueue.poll()) != null) {
+            safeExecute(task);
+        }
+        return true;
     }
 
     /**
@@ -431,6 +537,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
      */
     @UnstableApi
     protected void afterRunningAllTasks() { }
+
     /**
      * Returns the amount of time left until the scheduled task with the closest dead line is executed.
      */
@@ -441,6 +548,19 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         return scheduledTask.delayNanos(currentTimeNanos);
+    }
+
+    /**
+     * Returns the absolute point in time (relative to {@link #nanoTime()}) at which the the next
+     * closest scheduled task should run.
+     */
+    @UnstableApi
+    protected long deadlineNanos() {
+        ScheduledFutureTask<?> scheduledTask = peekScheduledTask();
+        if (scheduledTask == null) {
+            return nanoTime() + SCHEDULE_PURGE_INTERVAL;
+        }
+        return scheduledTask.deadlineNanos();
     }
 
     /**
@@ -467,10 +587,29 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     }
 
     protected void wakeup(boolean inEventLoop) {
-        if (!inEventLoop || state == ST_SHUTTING_DOWN) {
+        if (!inEventLoop) {
             // Use offer as we actually only need this to unblock the thread and if offer fails we do not care as there
             // is already something in the queue.
             taskQueue.offer(WAKEUP_TASK);
+        }
+    }
+
+    @Override
+    final void executeScheduledRunnable(final Runnable runnable, boolean isAddition, long deadlineNanos) {
+        // Don't wakeup if this is a removal task or if beforeScheduledTaskSubmitted returns false
+        if (isAddition && beforeScheduledTaskSubmitted(deadlineNanos)) {
+            super.executeScheduledRunnable(runnable, isAddition, deadlineNanos);
+        } else {
+            super.executeScheduledRunnable(new NonWakeupRunnable() {
+                @Override
+                public void run() {
+                    runnable.run();
+                }
+            }, isAddition, deadlineNanos);
+            // Second hook after scheduling to facilitate race-avoidance
+            if (isAddition && afterScheduledTaskSubmitted(deadlineNanos)) {
+                wakeup(false);
+            }
         }
     }
 
@@ -582,23 +721,15 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         gracefulShutdownQuietPeriod = unit.toNanos(quietPeriod);
         gracefulShutdownTimeout = unit.toNanos(timeout);
 
-        if (oldState == ST_NOT_STARTED) {
-            try {
-                doStartThread();
-            } catch (Throwable cause) {
-                STATE_UPDATER.set(this, ST_TERMINATED);
-                terminationFuture.tryFailure(cause);
-
-                if (!(cause instanceof Exception)) {
-                    // Also rethrow as it may be an OOME for example
-                    PlatformDependent.throwException(cause);
-                }
-                return terminationFuture;
-            }
+        if (ensureThreadStarted(oldState)) {
+            return terminationFuture;
         }
 
         if (wakeup) {
-            wakeup(inEventLoop);
+            taskQueue.offer(WAKEUP_TASK);
+            if (!addTaskWakesUp) {
+                wakeup(inEventLoop);
+            }
         }
 
         return terminationFuture();
@@ -645,23 +776,15 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             }
         }
 
-        if (oldState == ST_NOT_STARTED) {
-            try {
-                doStartThread();
-            } catch (Throwable cause) {
-                STATE_UPDATER.set(this, ST_TERMINATED);
-                terminationFuture.tryFailure(cause);
-
-                if (!(cause instanceof Exception)) {
-                    // Also rethrow as it may be an OOME for example
-                    PlatformDependent.throwException(cause);
-                }
-                return;
-            }
+        if (ensureThreadStarted(oldState)) {
+            return;
         }
 
         if (wakeup) {
-            wakeup(inEventLoop);
+            taskQueue.offer(WAKEUP_TASK);
+            if (!addTaskWakesUp) {
+                wakeup(inEventLoop);
+            }
         }
     }
 
@@ -710,7 +833,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             if (gracefulShutdownQuietPeriod == 0) {
                 return true;
             }
-            wakeup(true);
+            taskQueue.offer(WAKEUP_TASK);
             return false;
         }
 
@@ -723,7 +846,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         if (nanoTime - lastExecutionTime <= gracefulShutdownQuietPeriod) {
             // Check if any tasks were added to the queue every 100ms.
             // TODO: Change the behavior of takeTask() so that it returns on timeout.
-            wakeup(true);
+            taskQueue.offer(WAKEUP_TASK);
             try {
                 Thread.sleep(100);
             } catch (InterruptedException e) {
@@ -748,9 +871,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
             throw new IllegalStateException("cannot await termination of the current thread");
         }
 
-        if (threadLock.tryAcquire(timeout, unit)) {
-            threadLock.release();
-        }
+        threadLock.await(timeout, unit);
 
         return isTerminated();
     }
@@ -762,13 +883,23 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         }
 
         boolean inEventLoop = inEventLoop();
-        if (inEventLoop) {
-            addTask(task);
-        } else {
+        addTask(task);
+        if (!inEventLoop) {
             startThread();
-            addTask(task);
-            if (isShutdown() && removeTask(task)) {
-                reject();
+            if (isShutdown()) {
+                boolean reject = false;
+                try {
+                    if (removeTask(task)) {
+                        reject = true;
+                    }
+                } catch (UnsupportedOperationException e) {
+                    // The task queue does not support removal so the best thing we can do is to just move on and
+                    // hope we will be able to pick-up the task before its completely terminated.
+                    // In worst case we will log on termination.
+                }
+                if (reject) {
+                    reject();
+                }
             }
         }
 
@@ -812,7 +943,7 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
     /**
      * Returns the {@link ThreadProperties} of the {@link Thread} that powers the {@link SingleThreadEventExecutor}.
-     * If the {@link SingleThreadEventExecutor} is not started yet, this operation will start it and block until the
+     * If the {@link SingleThreadEventExecutor} is not started yet, this operation will start it and block until
      * it is fully started.
      */
     public final ThreadProperties threadProperties() {
@@ -835,9 +966,21 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
         return threadProperties;
     }
 
-    @SuppressWarnings("unused")
+    /**
+     * Marker interface for {@link Runnable} to indicate that it should be queued for execution
+     * but does not need to run immediately. The default implementation of
+     * {@link SingleThreadEventExecutor#wakesUpForTask(Runnable)} uses this to avoid waking up
+     * the {@link EventExecutor} thread when not necessary.
+     */
+    protected interface NonWakeupRunnable extends Runnable { }
+
+    /**
+     * Can be overridden to control which tasks require waking the {@link EventExecutor} thread
+     * if it is waiting so that they can be run immediately. The default implementation
+     * decides based on whether the task implements {@link NonWakeupRunnable}.
+     */
     protected boolean wakesUpForTask(Runnable task) {
-        return true;
+        return !(task instanceof NonWakeupRunnable);
     }
 
     protected static void reject() {
@@ -860,14 +1003,35 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
     private void startThread() {
         if (state == ST_NOT_STARTED) {
             if (STATE_UPDATER.compareAndSet(this, ST_NOT_STARTED, ST_STARTED)) {
+                boolean success = false;
                 try {
                     doStartThread();
-                } catch (Throwable cause) {
-                    STATE_UPDATER.set(this, ST_NOT_STARTED);
-                    PlatformDependent.throwException(cause);
+                    success = true;
+                } finally {
+                    if (!success) {
+                        STATE_UPDATER.compareAndSet(this, ST_STARTED, ST_NOT_STARTED);
+                    }
                 }
             }
         }
+    }
+
+    private boolean ensureThreadStarted(int oldState) {
+        if (oldState == ST_NOT_STARTED) {
+            try {
+                doStartThread();
+            } catch (Throwable cause) {
+                STATE_UPDATER.set(this, ST_TERMINATED);
+                terminationFuture.tryFailure(cause);
+
+                if (!(cause instanceof Exception)) {
+                    // Also rethrow as it may be an OOME for example
+                    PlatformDependent.throwException(cause);
+                }
+                return true;
+            }
+        }
+        return false;
     }
 
     private void doStartThread() {
@@ -898,9 +1062,11 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
 
                     // Check if confirmShutdown() was called at the end of the loop.
                     if (success && gracefulShutdownStartTime == 0) {
-                        logger.error("Buggy " + EventExecutor.class.getSimpleName() + " implementation; " +
-                                SingleThreadEventExecutor.class.getSimpleName() + ".confirmShutdown() must be called " +
-                                "before run() implementation terminates.");
+                        if (logger.isErrorEnabled()) {
+                            logger.error("Buggy " + EventExecutor.class.getSimpleName() + " implementation; " +
+                                    SingleThreadEventExecutor.class.getSimpleName() + ".confirmShutdown() must " +
+                                    "be called before run() implementation terminates.");
+                        }
                     }
 
                     try {
@@ -914,14 +1080,18 @@ public abstract class SingleThreadEventExecutor extends AbstractScheduledEventEx
                         try {
                             cleanup();
                         } finally {
-                            STATE_UPDATER.set(SingleThreadEventExecutor.this, ST_TERMINATED);
-                            threadLock.release();
-                            if (!taskQueue.isEmpty()) {
-                                logger.warn(
-                                        "An event executor terminated with " +
-                                                "non-empty task queue (" + taskQueue.size() + ')');
-                            }
+                            // Lets remove all FastThreadLocals for the Thread as we are about to terminate and notify
+                            // the future. The user may block on the future and once it unblocks the JVM may terminate
+                            // and start unloading classes.
+                            // See https://github.com/netty/netty/issues/6596.
+                            FastThreadLocal.removeAll();
 
+                            STATE_UPDATER.set(SingleThreadEventExecutor.this, ST_TERMINATED);
+                            threadLock.countDown();
+                            if (logger.isWarnEnabled() && !taskQueue.isEmpty()) {
+                                logger.warn("An event executor terminated with " +
+                                        "non-empty task queue (" + taskQueue.size() + ')');
+                            }
                             terminationFuture.setSuccess(null);
                         }
                     }

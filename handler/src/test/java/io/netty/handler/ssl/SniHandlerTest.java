@@ -16,6 +16,32 @@
 
 package io.netty.handler.ssl;
 
+import static org.hamcrest.CoreMatchers.is;
+import static org.hamcrest.CoreMatchers.nullValue;
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertThat;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
+import static org.junit.Assume.assumeTrue;
+
+import java.io.File;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import javax.net.ssl.SSLEngine;
+
+import org.junit.Test;
+import org.junit.runner.RunWith;
+import org.junit.runners.Parameterized;
+
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
@@ -46,25 +72,8 @@ import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.ResourcesUtil;
 import io.netty.util.internal.StringUtil;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
-
-import java.io.File;
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
-
-import javax.net.ssl.SSLEngine;
-
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.nullValue;
-import static org.junit.Assert.*;
-import static org.junit.Assume.assumeTrue;
 
 @RunWith(Parameterized.class)
 public class SniHandlerTest {
@@ -98,8 +107,8 @@ public class SniHandlerTest {
             assumeApnSupported(provider);
         }
 
-        File keyFile = new File(SniHandlerTest.class.getResource("test_encrypted.pem").getFile());
-        File crtFile = new File(SniHandlerTest.class.getResource("test.crt").getFile());
+        File keyFile = ResourcesUtil.getFile(SniHandlerTest.class, "test_encrypted.pem");
+        File crtFile = ResourcesUtil.getFile(SniHandlerTest.class, "test.crt");
 
         SslContextBuilder sslCtxBuilder = SslContextBuilder.forServer(crtFile, keyFile, "12345")
                 .sslProvider(provider);
@@ -114,7 +123,7 @@ public class SniHandlerTest {
             assumeApnSupported(provider);
         }
 
-        File crtFile = new File(SniHandlerTest.class.getResource("test.crt").getFile());
+        File crtFile = ResourcesUtil.getFile(SniHandlerTest.class, "test.crt");
 
         SslContextBuilder sslCtxBuilder = SslContextBuilder.forClient().trustManager(crtFile).sslProvider(provider);
         if (apn) {
@@ -338,6 +347,8 @@ public class SniHandlerTest {
         SslContext sniContext = makeSslContext(provider, true);
         final SslContext clientContext = makeSslClientContext(provider, true);
         try {
+            final AtomicBoolean serverApnCtx = new AtomicBoolean(false);
+            final AtomicBoolean clientApnCtx = new AtomicBoolean(false);
             final CountDownLatch serverApnDoneLatch = new CountDownLatch(1);
             final CountDownLatch clientApnDoneLatch = new CountDownLatch(1);
 
@@ -362,6 +373,8 @@ public class SniHandlerTest {
                         p.addLast(new ApplicationProtocolNegotiationHandler("foo") {
                             @Override
                             protected void configurePipeline(ChannelHandlerContext ctx, String protocol) {
+                                // addresses issue #9131
+                                serverApnCtx.set(ctx.pipeline().context(this) != null);
                                 serverApnDoneLatch.countDown();
                             }
                         });
@@ -380,6 +393,8 @@ public class SniHandlerTest {
                         ch.pipeline().addLast(new ApplicationProtocolNegotiationHandler("foo") {
                             @Override
                             protected void configurePipeline(ChannelHandlerContext ctx, String protocol) {
+                                // addresses issue #9131
+                                clientApnCtx.set(ctx.pipeline().context(this) != null);
                                 clientApnDoneLatch.countDown();
                             }
                         });
@@ -394,6 +409,8 @@ public class SniHandlerTest {
 
                 assertTrue(serverApnDoneLatch.await(5, TimeUnit.SECONDS));
                 assertTrue(clientApnDoneLatch.await(5, TimeUnit.SECONDS));
+                assertTrue(serverApnCtx.get());
+                assertTrue(clientApnCtx.get());
                 assertThat(handler.hostname(), is("sni.fake.site"));
                 assertThat(handler.sslContext(), is(sniContext));
             } finally {
@@ -447,6 +464,7 @@ public class SniHandlerTest {
 
                             boolean success = false;
                             try {
+                                assertEquals(1, ((ReferenceCountedOpenSslContext) sslContext).refCnt());
                                 // The SniHandler's replaceHandler() method allows us to implement custom behavior.
                                 // As an example, we want to release() the SslContext upon channelInactive() or rather
                                 // when the SslHandler closes it's SslEngine. If you take a close look at SslHandler
@@ -454,6 +472,7 @@ public class SniHandlerTest {
 
                                 SSLEngine sslEngine = sslContext.newEngine(ctx.alloc());
                                 try {
+                                    assertEquals(2, ((ReferenceCountedOpenSslContext) sslContext).refCnt());
                                     SslHandler customSslHandler = new CustomSslHandler(sslContext, sslEngine) {
                                         @Override
                                         public void handlerRemoved0(ChannelHandlerContext ctx) throws Exception {
@@ -500,8 +519,9 @@ public class SniHandlerTest {
                     cc.writeAndFlush(Unpooled.wrappedBuffer("Hello, World!".getBytes()))
                             .syncUninterruptibly();
 
-                    // Notice how the server's SslContext refCnt is 1
-                    assertEquals(1, ((ReferenceCounted) sslServerContext).refCnt());
+                    // Notice how the server's SslContext refCnt is 2 as it is incremented when the SSLEngine is created
+                    // and only decremented once it is destroyed.
+                    assertEquals(2, ((ReferenceCounted) sslServerContext).refCnt());
 
                     // The client disconnects
                     cc.close().syncUninterruptibly();
@@ -541,7 +561,7 @@ public class SniHandlerTest {
     private static class CustomSslHandler extends SslHandler {
         private final SslContext sslContext;
 
-        public CustomSslHandler(SslContext sslContext, SSLEngine sslEngine) {
+        CustomSslHandler(SslContext sslContext, SSLEngine sslEngine) {
             super(sslEngine);
             this.sslContext = ObjectUtil.checkNotNull(sslContext, "sslContext");
         }

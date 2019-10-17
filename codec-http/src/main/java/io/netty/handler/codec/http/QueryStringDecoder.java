@@ -54,7 +54,7 @@ import static io.netty.util.internal.StringUtil.*;
  *
  * <h3>HashDOS vulnerability fix</h3>
  *
- * As a workaround to the <a href="http://netty.io/s/hashdos">HashDOS</a> vulnerability, the decoder
+ * As a workaround to the <a href="https://netty.io/s/hashdos">HashDOS</a> vulnerability, the decoder
  * limits the maximum number of decoded key-value parameter pairs, up to {@literal 1024} by
  * default, and you can configure it when you construct the decoder by passing an additional
  * integer parameter.
@@ -266,7 +266,7 @@ public class QueryStringDecoder {
     }
 
     /**
-     * Decodes a bit of an URL encoded by a browser.
+     * Decodes a bit of a URL encoded by a browser.
      * <p>
      * This is equivalent to calling {@link #decodeComponent(String, Charset)}
      * with the UTF-8 charset (recommended to comply with RFC 3986, Section 2).
@@ -281,7 +281,7 @@ public class QueryStringDecoder {
     }
 
     /**
-     * Decodes a bit of an URL encoded by a browser.
+     * Decodes a bit of a URL encoded by a browser.
      * <p>
      * The string is expected to be encoded as per RFC 3986, Section 2.
      * This is the encoding used by JavaScript functions {@code encodeURI}

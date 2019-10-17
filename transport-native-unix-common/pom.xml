@@ -19,7 +19,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.23.Final-SNAPSHOT</version>
+    <version>4.1.43.Final-SNAPSHOT</version>
   </parent>
   <artifactId>netty-transport-native-unix-common</artifactId>
 
@@ -43,6 +43,29 @@
     <defaultJarFile>${project.build.directory}/${project.build.finalName}.jar</defaultJarFile>
     <nativeJarFile>${project.build.directory}/${project.build.finalName}-${jni.classifier}.jar</nativeJarFile>
   </properties>
+
+  <build>
+    <plugins>
+      <!-- Also include c files in source jar -->
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>build-helper-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <phase>generate-sources</phase>
+            <goals>
+              <goal>add-source</goal>
+            </goals>
+            <configuration>
+              <sources>
+                <source>${nativeIncludeDir}</source>
+              </sources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
 
   <profiles>
     <profile>
@@ -101,7 +124,7 @@
                       <env key="LIB_DIR" value="${nativeLibOnlyDir}" />
                       <env key="OBJ_DIR" value="${nativeObjsOnlyDir}" />
                       <env key="JNI_PLATFORM" value="${jni.platform}" />
-                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable" />
+                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable -fvisibility=hidden" />
                       <env key="LDFLAGS" value="-Wl,--no-as-needed -lrt" />
                       <env key="LIB_NAME" value="${nativeLibName}" />
                       <!-- support for __attribute__((weak_import)) by the linker was added in 10.2 so ensure we
@@ -172,7 +195,7 @@
                       <env key="LIB_DIR" value="${nativeLibOnlyDir}" />
                       <env key="OBJ_DIR" value="${nativeObjsOnlyDir}" />
                       <env key="JNI_PLATFORM" value="${jni.platform}" />
-                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable" />
+                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable -fvisibility=hidden" />
                       <env key="LDFLAGS" value="-Wl,--no-as-needed -lrt" />
                       <env key="LIB_NAME" value="${nativeLibName}" />
                     </exec>
@@ -242,7 +265,7 @@
                       <env key="LIB_DIR" value="${nativeLibOnlyDir}" />
                       <env key="OBJ_DIR" value="${nativeObjsOnlyDir}" />
                       <env key="JNI_PLATFORM" value="${jni.platform}" />
-                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable" />
+                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable -fvisibility=hidden" />
                       <env key="LDFLAGS" value="-Wl,--no-as-needed -lrt" />
                       <env key="LIB_NAME" value="${nativeLibName}" />
                     </exec>
@@ -312,7 +335,7 @@
                       <env key="LIB_DIR" value="${nativeLibOnlyDir}" />
                       <env key="OBJ_DIR" value="${nativeObjsOnlyDir}" />
                       <env key="JNI_PLATFORM" value="${jni.platform}" />
-                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable" />
+                      <env key="CFLAGS" value="-O3 -Werror -Wno-attributes -fPIC -fno-omit-frame-pointer -Wunused-variable -fvisibility=hidden" />
                       <env key="LDFLAGS" value="-Wl,--no-as-needed -lrt" />
                       <env key="LIB_NAME" value="${nativeLibName}" />
                     </exec>
@@ -330,6 +353,11 @@
     <dependency>
       <groupId>io.netty</groupId>
       <artifactId>netty-common</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-buffer</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>

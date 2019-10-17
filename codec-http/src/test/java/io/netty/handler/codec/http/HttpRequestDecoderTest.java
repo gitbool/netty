@@ -81,7 +81,7 @@ public class HttpRequestDecoderTest {
 
     private static void testDecodeWholeRequestAtOnce(byte[] content) {
         EmbeddedChannel channel = new EmbeddedChannel(new HttpRequestDecoder());
-        assertTrue(channel.writeInbound(Unpooled.wrappedBuffer(content)));
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(content)));
         HttpRequest req = channel.readInbound();
         assertNotNull(req);
         checkHeaders(req.headers());
@@ -145,14 +145,14 @@ public class HttpRequestDecoderTest {
                 amount = headerLength -  a;
             }
 
-            // if header is done it should produce a HttpRequest
-            channel.writeInbound(Unpooled.wrappedBuffer(content, a, amount));
+            // if header is done it should produce an HttpRequest
+            channel.writeInbound(Unpooled.copiedBuffer(content, a, amount));
             a += amount;
         }
 
         for (int i = CONTENT_LENGTH; i > 0; i --) {
             // Should produce HttpContent
-            channel.writeInbound(Unpooled.wrappedBuffer(content, content.length - i, 1));
+            channel.writeInbound(Unpooled.copiedBuffer(content, content.length - i, 1));
         }
 
         HttpRequest req = channel.readInbound();
@@ -318,6 +318,20 @@ public class HttpRequestDecoderTest {
         HttpRequest request = channel.readInbound();
         assertTrue(request.decoderResult().isFailure());
         assertTrue(request.decoderResult().cause() instanceof TooLongFrameException);
+        assertFalse(channel.finish());
+    }
+
+    @Test
+    public void testWhitespace() {
+        EmbeddedChannel channel = new EmbeddedChannel(new HttpRequestDecoder());
+        String requestStr = "GET /some/path HTTP/1.1\r\n" +
+                "Transfer-Encoding : chunked\r\n" +
+                "Host: netty.io\n\r\n";
+
+        assertTrue(channel.writeInbound(Unpooled.copiedBuffer(requestStr, CharsetUtil.US_ASCII)));
+        HttpRequest request = channel.readInbound();
+        assertTrue(request.decoderResult().isFailure());
+        assertTrue(request.decoderResult().cause() instanceof IllegalArgumentException);
         assertFalse(channel.finish());
     }
 }

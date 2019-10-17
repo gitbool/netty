@@ -98,7 +98,7 @@ final class PemReader {
             throw new CertificateException("found no certificates in input stream");
         }
 
-        return certs.toArray(new ByteBuf[certs.size()]);
+        return certs.toArray(new ByteBuf[0]);
     }
 
     static ByteBuf readPrivateKey(File file) throws KeyException {
@@ -126,7 +126,7 @@ final class PemReader {
         Matcher m = KEY_PATTERN.matcher(content);
         if (!m.find()) {
             throw new KeyException("could not find a PKCS #8 private key in input stream" +
-                    " (see http://netty.io/wiki/sslcontextbuilder-and-private-key.html for more information)");
+                    " (see https://netty.io/wiki/sslcontextbuilder-and-private-key.html for more information)");
         }
 
         ByteBuf base64 = Unpooled.copiedBuffer(m.group(1), CharsetUtil.US_ASCII);

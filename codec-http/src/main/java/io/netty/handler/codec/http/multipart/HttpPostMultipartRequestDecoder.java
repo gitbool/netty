@@ -764,8 +764,6 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
                         }
                     }
                 }
-            } else {
-                throw new ErrorDataDecoderException("Unknown Params: " + newline);
             }
         }
         // Is it a FileUpload
@@ -933,18 +931,14 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
      */
     @Override
     public void destroy() {
-        checkDestroyed();
+        // Release all data items, including those not yet pulled
         cleanFiles();
+
         destroyed = true;
 
         if (undecodedChunk != null && undecodedChunk.refCnt() > 0) {
             undecodedChunk.release();
             undecodedChunk = null;
-        }
-
-        // release all data which was not yet pulled
-        for (int i = bodyListHttpDataRank; i < bodyListHttpData.size(); i++) {
-            bodyListHttpData.get(i).release();
         }
     }
 
@@ -1515,6 +1509,6 @@ public class HttpPostMultipartRequestDecoder implements InterfaceHttpPostRequest
             }
         }
         values.add(svalue.substring(start));
-        return values.toArray(new String[values.size()]);
+        return values.toArray(new String[0]);
     }
 }

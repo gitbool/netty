@@ -148,13 +148,18 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
         this.request = checkNotNull(request, "request");
         this.charset = checkNotNull(charset, "charset");
         this.factory = checkNotNull(factory, "factory");
-        if (request instanceof HttpContent) {
-            // Offer automatically if the given request is als type of HttpContent
-            // See #1089
-            offer((HttpContent) request);
-        } else {
-            undecodedChunk = buffer();
-            parseBody();
+        try {
+            if (request instanceof HttpContent) {
+                // Offer automatically if the given request is als type of HttpContent
+                // See #1089
+                offer((HttpContent) request);
+            } else {
+                undecodedChunk = buffer();
+                parseBody();
+            }
+        } catch (HttpPostRequestDecoder.ErrorDataDecoderException e) {
+            destroy();
+            throw e;
         }
     }
 
@@ -466,21 +471,13 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
                 }
                 firstpos = currentpos;
                 currentStatus = MultiPartStatus.EPILOGUE;
-                undecodedChunk.readerIndex(firstpos);
-                return;
-            }
-            if (contRead && currentAttribute != null) {
+            } else if (contRead && currentAttribute != null && currentStatus == MultiPartStatus.FIELD) {
                 // reset index except if to continue in case of FIELD getStatus
-                if (currentStatus == MultiPartStatus.FIELD) {
-                    currentAttribute.addContent(undecodedChunk.copy(firstpos, currentpos - firstpos),
-                                                false);
-                    firstpos = currentpos;
-                }
-                undecodedChunk.readerIndex(firstpos);
-            } else {
-                // end of line or end of block so keep index to last valid position
-                undecodedChunk.readerIndex(firstpos);
+                currentAttribute.addContent(undecodedChunk.copy(firstpos, currentpos - firstpos),
+                                            false);
+                firstpos = currentpos;
             }
+            undecodedChunk.readerIndex(firstpos);
         } catch (ErrorDataDecoderException e) {
             // error while decoding
             undecodedChunk.readerIndex(firstpos);
@@ -596,21 +593,13 @@ public class HttpPostStandardRequestDecoder implements InterfaceHttpPostRequestD
                 }
                 firstpos = currentpos;
                 currentStatus = MultiPartStatus.EPILOGUE;
-                undecodedChunk.readerIndex(firstpos);
-                return;
-            }
-            if (contRead && currentAttribute != null) {
+            } else if (contRead && currentAttribute != null && currentStatus == MultiPartStatus.FIELD) {
                 // reset index except if to continue in case of FIELD getStatus
-                if (currentStatus == MultiPartStatus.FIELD) {
-                    currentAttribute.addContent(undecodedChunk.copy(firstpos, currentpos - firstpos),
-                                                false);
-                    firstpos = currentpos;
-                }
-                undecodedChunk.readerIndex(firstpos);
-            } else {
-                // end of line or end of block so keep index to last valid position
-                undecodedChunk.readerIndex(firstpos);
+                currentAttribute.addContent(undecodedChunk.copy(firstpos, currentpos - firstpos),
+                                            false);
+                firstpos = currentpos;
             }
+            undecodedChunk.readerIndex(firstpos);
         } catch (ErrorDataDecoderException e) {
             // error while decoding
             undecodedChunk.readerIndex(firstpos);

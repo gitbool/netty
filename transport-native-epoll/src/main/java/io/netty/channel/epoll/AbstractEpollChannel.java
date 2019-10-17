@@ -33,11 +33,11 @@ import io.netty.channel.EventLoop;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
 import io.netty.channel.socket.ChannelInputShutdownReadComplete;
+import io.netty.channel.socket.SocketChannelConfig;
 import io.netty.channel.unix.FileDescriptor;
 import io.netty.channel.unix.Socket;
 import io.netty.channel.unix.UnixChannel;
 import io.netty.util.ReferenceCountUtil;
-import io.netty.util.internal.ThrowableUtil;
 
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -56,10 +56,7 @@ import static io.netty.channel.unix.UnixChannelUtil.computeRemoteAddr;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 abstract class AbstractEpollChannel extends AbstractChannel implements UnixChannel {
-    private static final ClosedChannelException DO_CLOSE_CLOSED_CHANNEL_EXCEPTION = ThrowableUtil.unknownStackTrace(
-            new ClosedChannelException(), AbstractEpollChannel.class, "doClose()");
     private static final ChannelMetadata METADATA = new ChannelMetadata(false);
-    private final int readFlag;
     final LinuxSocket socket;
     /**
      * The future of the current connection attempt.  If not null, subsequent
@@ -72,21 +69,20 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
     private volatile SocketAddress local;
     private volatile SocketAddress remote;
 
-    protected int flags = Native.EPOLLET;
+    protected int flags = Native.EPOLLET | Native.EPOLLIN;
+    protected int activeFlags;
     boolean inputClosedSeenErrorOnRead;
     boolean epollInReadyRunnablePending;
 
     protected volatile boolean active;
 
-    AbstractEpollChannel(LinuxSocket fd, int flag) {
-        this(null, fd, flag, false);
+    AbstractEpollChannel(LinuxSocket fd) {
+        this(null, fd, false);
     }
 
-    AbstractEpollChannel(Channel parent, LinuxSocket fd, int flag, boolean active) {
+    AbstractEpollChannel(Channel parent, LinuxSocket fd, boolean active) {
         super(parent);
         socket = checkNotNull(fd, "fd");
-        readFlag = flag;
-        flags |= flag;
         this.active = active;
         if (active) {
             // Directly cache the remote and local addresses
@@ -96,11 +92,9 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         }
     }
 
-    AbstractEpollChannel(Channel parent, LinuxSocket fd, int flag, SocketAddress remote) {
+    AbstractEpollChannel(Channel parent, LinuxSocket fd, SocketAddress remote) {
         super(parent);
         socket = checkNotNull(fd, "fd");
-        readFlag = flag;
-        flags |= flag;
         active = true;
         // Directly cache the remote and local addresses
         // See https://github.com/netty/netty/issues/2359
@@ -116,17 +110,23 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         }
     }
 
-    void setFlag(int flag) throws IOException {
+    void setFlag(int flag) {
         if (!isFlagSet(flag)) {
             flags |= flag;
-            modifyEvents();
+            updatePendingFlagsSet();
         }
     }
 
-    void clearFlag(int flag) throws IOException {
+    void clearFlag(int flag) {
         if (isFlagSet(flag)) {
             flags &= ~flag;
-            modifyEvents();
+            updatePendingFlagsSet();
+        }
+    }
+
+    private void updatePendingFlagsSet() {
+        if (isRegistered()) {
+            ((EpollEventLoop) eventLoop()).updatePendingFlagsSet(this);
         }
     }
 
@@ -162,7 +162,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             ChannelPromise promise = connectPromise;
             if (promise != null) {
                 // Use tryFailure() instead of setFailure() to avoid the race against cancel().
-                promise.tryFailure(DO_CLOSE_CLOSED_CHANNEL_EXCEPTION);
+                promise.tryFailure(new ClosedChannelException());
                 connectPromise = null;
             }
 
@@ -198,6 +198,11 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         }
     }
 
+    void resetCachedAddresses() {
+        local = socket.localAddress();
+        remote = socket.remoteAddress();
+    }
+
     @Override
     protected void doDisconnect() throws Exception {
         doClose();
@@ -227,7 +232,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         // We must set the read flag here as it is possible the user didn't read in the last read loop, the
         // executeEpollInReadyRunnable could read nothing, and if the user doesn't explicitly call read they will
         // never get data after this.
-        setFlag(readFlag);
+        setFlag(Native.EPOLLIN);
 
         // If EPOLL ET mode is enabled and auto read was toggled off on the last read loop then we may not be notified
         // again if we didn't consume all the data. So we force a read operation here if there maybe more data.
@@ -241,37 +246,40 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
     }
 
     private static boolean isAllowHalfClosure(ChannelConfig config) {
-        return config instanceof EpollSocketChannelConfig &&
-                ((EpollSocketChannelConfig) config).isAllowHalfClosure();
+        if (config instanceof EpollDomainSocketChannelConfig) {
+            return ((EpollDomainSocketChannelConfig) config).isAllowHalfClosure();
+        }
+        return config instanceof SocketChannelConfig &&
+                ((SocketChannelConfig) config).isAllowHalfClosure();
     }
+
+    private Runnable clearEpollInTask;
 
     final void clearEpollIn() {
         // Only clear if registered with an EventLoop as otherwise
-        if (isRegistered()) {
-            final EventLoop loop = eventLoop();
-            final AbstractEpollUnsafe unsafe = (AbstractEpollUnsafe) unsafe();
-            if (loop.inEventLoop()) {
-                unsafe.clearEpollIn0();
-            } else {
-                // schedule a task to clear the EPOLLIN as it is not safe to modify it directly
-                loop.execute(new Runnable() {
-                    @Override
-                    public void run() {
-                        if (!unsafe.readPending && !config().isAutoRead()) {
-                            // Still no read triggered so clear it now
-                            unsafe.clearEpollIn0();
-                        }
-                    }
-                });
-            }
-        } else  {
-            // The EventLoop is not registered atm so just update the flags so the correct value
-            // will be used once the channel is registered
-            flags &= ~readFlag;
+        final EventLoop loop = isRegistered() ? eventLoop() : null;
+        final AbstractEpollUnsafe unsafe = (AbstractEpollUnsafe) unsafe();
+        if (loop == null || loop.inEventLoop()) {
+            unsafe.clearEpollIn0();
+            return;
         }
+        // schedule a task to clear the EPOLLIN as it is not safe to modify it directly
+        Runnable clearFlagTask = clearEpollInTask;
+        if (clearFlagTask == null) {
+            clearEpollInTask = clearFlagTask = new Runnable() {
+                @Override
+                public void run() {
+                    if (!unsafe.readPending && !config().isAutoRead()) {
+                        // Still no read triggered so clear it now
+                        unsafe.clearEpollIn0();
+                    }
+                }
+            };
+        }
+        loop.execute(clearFlagTask);
     }
 
-    private void modifyEvents() throws IOException {
+    void modifyEvents() throws IOException {
         if (isOpen() && isRegistered()) {
             ((EpollEventLoop) eventLoop()).modify(this);
         }
@@ -392,19 +400,14 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
          */
         abstract void epollInReady();
 
-        final void epollInBefore() { maybeMoreDataToRead = false; }
+        final void epollInBefore() {
+            maybeMoreDataToRead = false;
+        }
 
         final void epollInFinally(ChannelConfig config) {
-            maybeMoreDataToRead = allocHandle.isEdgeTriggered() && allocHandle.maybeMoreDataToRead();
-            // Check if there is a readPending which was not processed yet.
-            // This could be for two reasons:
-            // * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
-            // * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
-            //
-            // See https://github.com/netty/netty/issues/2254
-            if (!readPending && !config.isAutoRead()) {
-                clearEpollIn();
-            } else if (readPending && maybeMoreDataToRead) {
+            maybeMoreDataToRead = allocHandle.maybeMoreDataToRead();
+
+            if (allocHandle.isReceivedRdHup() || (readPending && maybeMoreDataToRead)) {
                 // trigger a read again as there may be something left to read and because of epoll ET we
                 // will not get notified again until we read everything from the socket
                 //
@@ -413,6 +416,14 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                 // to false before every read operation to prevent re-entry into epollInReady() we will not read from
                 // the underlying OS again unless the user happens to call read again.
                 executeEpollInReadyRunnable(config);
+            } else if (!readPending && !config.isAutoRead()) {
+                // Check if there is a readPending which was not processed yet.
+                // This could be for two reasons:
+                // * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
+                // * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
+                //
+                // See https://github.com/netty/netty/issues/2254
+                clearEpollIn0();
             }
         }
 
@@ -442,19 +453,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
             }
 
             // Clear the EPOLLRDHUP flag to prevent continuously getting woken up on this event.
-            clearEpollRdHup();
-        }
-
-        /**
-         * Clear the {@link Native#EPOLLRDHUP} flag from EPOLL, and close on failure.
-         */
-        private void clearEpollRdHup() {
-            try {
-                clearFlag(Native.EPOLLRDHUP);
-            } catch (IOException e) {
-                pipeline().fireExceptionCaught(e);
-                close(voidPromise());
-            }
+            clearFlag(Native.EPOLLRDHUP);
         }
 
         /**
@@ -474,7 +473,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
                         // We attempted to shutdown and failed, which means the input has already effectively been
                         // shutdown.
                     }
-                    clearEpollIn();
+                    clearEpollIn0();
                     pipeline().fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
                 } else {
                     close(voidPromise());
@@ -530,16 +529,9 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         }
 
         protected final void clearEpollIn0() {
-            assert eventLoop().inEventLoop();
-            try {
-                readPending = false;
-                clearFlag(readFlag);
-            } catch (IOException e) {
-                // When this happens there is something completely wrong with either the filedescriptor or epoll,
-                // so fire the exception through the pipeline and close the Channel.
-                pipeline().fireExceptionCaught(e);
-                unsafe().close(unsafe().voidPromise());
-            }
+            assert !isRegistered() || eventLoop().inEventLoop();
+            readPending = false;
+            clearFlag(Native.EPOLLIN);
         }
 
         @Override
@@ -664,7 +656,7 @@ abstract class AbstractEpollChannel extends AbstractChannel implements UnixChann
         /**
          * Finish the connect
          */
-        private boolean doFinishConnect() throws Exception {
+        private boolean doFinishConnect() throws IOException {
             if (socket.finishConnect()) {
                 clearFlag(Native.EPOLLOUT);
                 if (requestedRemoteAddress instanceof InetSocketAddress) {
